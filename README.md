@@ -477,3 +477,8 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ---
 Made with ❤️ for Security Education
+
+
+# Vulnerable JWT implementation with common security issues
+
+JWT_SECRET = "secret1234"
