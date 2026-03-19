@@ -8,33 +8,214 @@
 
 ## Executive Summary
 
-Both CodeQL and Snyk Code were run against the same Python/Flask codebase. Together they produced 108 open alerts. **They are strongly complementary — neither tool alone provides adequate coverage.**
+Both CodeQL and Snyk Code were run against the same intentionally vulnerable Python/Flask banking application. The repository's `README.md` documents **68 implemented vulnerabilities** across 10 categories. Together the two SAST tools produced **108 open alerts** — but only covered **~18 of the 68 documented vulnerabilities**.
 
-**CodeQL** (56 alerts) excels at **breadth, precision, and grouping**. It covers 10 distinct vulnerability categories, assigns accurate severity levels (1 critical, 13 high, 42 medium), and provides CWE references for every finding. It is the only tool to detect the critical SSRF vulnerability and the clear-text password logging issue. For SQL injection, CodeQL groups multiple taint paths into a single alert at the vulnerable sink — producing 6 well-organized alerts that cover the same underlying vulnerabilities as Snyk's 25. However, its 39 stack-trace-exposure alerts — all with identical messages — create significant noise that hurts triage efficiency.
+| | CodeQL | Snyk Code | GitHub Secret Scanning |
+|---|---|---|---|
+| **Alerts** | 56 | 52 | 1 |
+| **Severity populated** | ✅ 1 critical, 13 high, 42 medium | ❌ All null | N/A |
+| **Documented vulns detected** | ~13 of 68 | ~9 of 68 | 1 of 68 |
+| **Best at** | Breadth, severity, SQLi grouping, SSRF, stack-trace exposure, CI/CD | XSS depth, taint-path detail, hardcoded secrets | API key detection |
+| **Misses** | Most XSS, hardcoded secrets | SSRF, stack traces, CI/CD, sensitive logging | Everything except known key formats |
 
-**Snyk Code** (52 alerts) excels at **taint-path enumeration and XSS detection**. For SQL injection, its 25 alerts are not 25 distinct vulnerabilities — they are 25 individual taint paths that converge on the same ~6 vulnerable sinks that CodeQL also identifies. This source-level reporting inflates the apparent count but provides useful detail about which callers trigger each vulnerability. For XSS, Snyk genuinely finds 5× more locations than CodeQL (22 vs 4). However, it **does not populate severity levels** (all 52 show as `null`), misses several high-impact categories entirely (SSRF, sensitive data logging, CI/CD misconfigurations), and produces false positives on properly parameterized SQL queries.
+**Key findings:**
+- **SQL injection:** Both tools detect the same ~6 underlying vulnerabilities. CodeQL groups them into 6 clean alerts; Snyk reports 25 (one per taint path) — same coverage, different presentation.
+- **XSS:** Snyk is dramatically better — 22 locations vs CodeQL's 4.
+- **SSRF:** Only CodeQL found the critical SSRF (the single most severe finding).
+- **Stack-trace exposure:** Only CodeQL detects this (39 alerts). Snyk has zero coverage of CWE-209.
+- **Secrets:** CodeQL doesn't do secret scanning. Snyk found 2 hardcoded secrets; GitHub Secret Scanning found 1 API key. Zero overlap between them.
+- **Business logic, auth flaws, race conditions, CSRF, file upload, AI/LLM vulns:** Neither SAST tool detects these — they require DAST, manual review, or specialized tooling.
 
-**On alert grouping and noise:** For SQL injection, **CodeQL's sink-level grouping is superior** — it consolidates 7+ taint paths into a single actionable alert at `database.py:255`, whereas Snyk creates 17 separate alerts for the same sink. For stack-trace exposure (CWE-209), CodeQL's 39 identical alerts are noisy, but Snyk **failed to detect this vulnerability category entirely** — 39 noisy alerts is better than zero. Snyk's source-level SQLi approach gives developers call-site detail but generates 4× more alerts for the same set of vulnerabilities. See the [Alert Grouping & Noise Analysis](#alert-grouping--noise-analysis) section for a detailed breakdown.
-
-**Bottom line:** Run both. Use CodeQL for severity-based triage and broad category coverage. Use Snyk Code for XSS detection (dramatically better) and for understanding which specific call sites trigger SQL injection vulnerabilities that CodeQL groups at the sink level.
+**Bottom line:** Run both SAST tools plus GitHub Secret Scanning. Even combined, SAST covers only ~26% of the documented attack surface. A full security assessment requires DAST, API/GraphQL scanners, and manual code review.
 
 ---
 
 ## Table of Contents
 
-1. [Alert Totals](#1-alert-totals)
-2. [Finding Categories — Side-by-Side](#2-finding-categories--side-by-side)
-3. [Detailed Finding-by-Finding Comparison](#3-detailed-finding-by-finding-comparison)
-4. [Alert Grouping & Noise Analysis](#4-alert-grouping--noise-analysis)
-5. [False Positive Analysis](#5-false-positive-analysis)
-6. [Metadata & Severity Quality](#6-metadata--severity-quality)
-7. [File Coverage Comparison](#7-file-coverage-comparison)
-8. [Precision vs Recall Summary](#8-precision-vs-recall-summary)
-9. [Recommendations](#9-recommendations)
+1. [Documented Vulnerabilities vs Scanner Coverage](#1-documented-vulnerabilities-vs-scanner-coverage)
+2. [Alert Totals](#2-alert-totals)
+3. [Finding Categories — Side-by-Side](#3-finding-categories--side-by-side)
+4. [Detailed Finding-by-Finding Comparison](#4-detailed-finding-by-finding-comparison)
+5. [Alert Grouping & Noise Analysis](#5-alert-grouping--noise-analysis)
+6. [False Positive Analysis](#6-false-positive-analysis)
+7. [Metadata & Severity Quality](#7-metadata--severity-quality)
+8. [File Coverage Comparison](#8-file-coverage-comparison)
+9. [Precision vs Recall Summary](#9-precision-vs-recall-summary)
+10. [Recommendations](#10-recommendations)
 
 ---
 
-## 1. Alert Totals
+## 1. Documented Vulnerabilities vs Scanner Coverage
+
+The repository documents 68 vulnerabilities across 10 categories. The table below maps each one to whether CodeQL, Snyk Code, or GitHub Secret Scanning detected it.
+
+**Legend:** ✅ Detected — ⚠️ Partially/indirectly detected — ❌ Not detected
+
+### 1. Authentication & Authorization (9 vulnerabilities)
+
+| Vulnerability | CodeQL | Snyk Code | Secret Scanning | Why missed? |
+|---|:---:|:---:|:---:|---|
+| SQL Injection in login | ✅ | ✅ | — | Both flag `auth.py:121` |
+| Weak JWT implementation | ❌ | ⚠️ | — | Snyk flags hardcoded JWT key (`auth.py:10`). Neither flags `none` algorithm. |
+| Broken object level authorization (BOLA) | ❌ | ❌ | — | Business logic — beyond SAST |
+| Broken object property level authorization (BOPLA) | ❌ | ❌ | — | Business logic — beyond SAST |
+| Mass Assignment & Excessive Data Exposure | ❌ | ⚠️ | — | Snyk flags `app.py:325` (SQLi via dynamic field names) which is the mass-assignment vector |
+| Weak password reset mechanism (3-digit PIN) | ❌ | ❌ | — | Design flaw — beyond SAST |
+| Token stored in localStorage | ❌ | ❌ | — | Client-side pattern — beyond server SAST |
+| No server-side token invalidation | ❌ | ❌ | — | Absence of logic — beyond SAST |
+| No session expiration | ❌ | ❌ | — | Absence of logic — beyond SAST |
+
+### 2. Data Security (6 vulnerabilities)
+
+| Vulnerability | CodeQL | Snyk Code | Secret Scanning | Why missed? |
+|---|:---:|:---:|:---:|---|
+| Information disclosure | ✅ | ❌ | — | CodeQL: 39× `py/stack-trace-exposure`. Snyk: missed entirely. |
+| Sensitive data exposure | ✅ | ❌ | — | CodeQL: `py/clear-text-logging-sensitive-data` (password in logs) |
+| Plaintext password storage | ❌ | ❌ | — | Neither tool checks for missing password hashing |
+| SQL injection points | ✅ | ✅ | — | Both detect across `app.py`, `auth.py`, `transaction_graphql.py` |
+| Debug information exposure | ✅ | ✅ | — | Both flag `app.run(debug=True)` |
+| Detailed error messages exposed | ✅ | ❌ | — | CodeQL: 39× stack-trace exposure. Snyk: not detected. |
+
+### 3. Transaction Vulnerabilities (6 vulnerabilities)
+
+| Vulnerability | CodeQL | Snyk Code | Secret Scanning | Why missed? |
+|---|:---:|:---:|:---:|---|
+| No amount validation | ❌ | ❌ | — | Business logic — beyond SAST |
+| Negative amount transfers possible | ❌ | ❌ | — | Business logic — beyond SAST |
+| No transaction limits | ❌ | ❌ | — | Business logic — beyond SAST |
+| Race conditions in transfers | ❌ | ❌ | — | Concurrency — beyond SAST |
+| Transaction history info disclosure | ❌ | ❌ | — | Authorization logic — beyond SAST |
+| No validation on recipient accounts | ❌ | ❌ | — | Business logic — beyond SAST |
+
+### 4. File Operations (7 vulnerabilities)
+
+| Vulnerability | CodeQL | Snyk Code | Secret Scanning | Why missed? |
+|---|:---:|:---:|:---:|---|
+| Unrestricted file upload | ❌ | ❌ | — | Absence of validation — beyond SAST |
+| Path traversal vulnerabilities | ❌ | ❌ | — | Not flagged by either tool |
+| No file type validation | ❌ | ❌ | — | Absence of logic — beyond SAST |
+| Directory traversal | ❌ | ❌ | — | Not flagged by either tool |
+| No file size limits | ❌ | ❌ | — | Absence of logic — beyond SAST |
+| Unsafe file naming | ❌ | ❌ | — | Not flagged by either tool |
+| SSRF via URL-based image import | ✅ | ⚠️ | — | CodeQL: `py/full-ssrf` (critical). Snyk flags same line for SSL bypass only — misses the SSRF. |
+
+### 5. Session Management (4 vulnerabilities)
+
+| Vulnerability | CodeQL | Snyk Code | Secret Scanning | Why missed? |
+|---|:---:|:---:|:---:|---|
+| Token vulnerabilities | ❌ | ⚠️ | — | Snyk flags hardcoded JWT key. Neither flags other token issues. |
+| No session expiration | ❌ | ❌ | — | Absence of logic — beyond SAST |
+| Weak secret keys | ❌ | ✅ | — | Snyk: `python/HardcodedKey` + `python/HardcodedNonCryptoSecret` |
+| Token exposure in URLs | ❌ | ❌ | — | Requires runtime/DAST analysis |
+
+### 6. Client and Server-Side Flaws (4 vulnerabilities)
+
+| Vulnerability | CodeQL | Snyk Code | Secret Scanning | Why missed? |
+|---|:---:|:---:|:---:|---|
+| Cross Site Scripting (XSS) | ✅ (4) | ✅ (22) | — | Snyk far superior: 22 DOM XSS vs CodeQL's 4 |
+| Cross Site Request Forgery (CSRF) | ❌ | ❌ | — | Absence of CSRF tokens — beyond SAST |
+| Insecure direct object references | ❌ | ❌ | — | Authorization logic — beyond SAST |
+| No rate limiting | ❌ | ❌ | — | Absence of logic — beyond SAST |
+
+### 7. Virtual Card Vulnerabilities (11 vulnerabilities)
+
+| Vulnerability | CodeQL | Snyk Code | Secret Scanning | Why missed? |
+|---|:---:|:---:|:---:|---|
+| Mass Assignment in card limit updates | ❌ | ❌ | — | Business logic — beyond SAST |
+| Mass Assignment in card funding exchange-rate | ❌ | ❌ | — | Business logic — beyond SAST |
+| Predictable card number generation | ❌ | ❌ | — | Weak randomness — not flagged |
+| Plaintext storage of card details | ❌ | ❌ | — | Data-at-rest — beyond SAST |
+| No validation on card limits | ❌ | ❌ | — | Business logic — beyond SAST |
+| BOLA in card operations | ❌ | ❌ | — | Authorization logic — beyond SAST |
+| Race conditions in balance updates | ❌ | ❌ | — | Concurrency — beyond SAST |
+| Card detail information disclosure | ❌ | ❌ | — | Authorization logic — beyond SAST |
+| No transaction verification | ❌ | ❌ | — | Business logic — beyond SAST |
+| Lack of card activity monitoring | ❌ | ❌ | — | Absence of logic — beyond SAST |
+| Client-controlled currency conversion | ❌ | ❌ | — | Business logic — beyond SAST |
+
+### 8. Bill Payment Vulnerabilities (9 vulnerabilities)
+
+| Vulnerability | CodeQL | Snyk Code | Secret Scanning | Why missed? |
+|---|:---:|:---:|:---:|---|
+| No validation on payment amounts | ❌ | ❌ | — | Business logic — beyond SAST |
+| SQL injection in biller queries | ✅ | ✅ | — | Grouped into `database.py` sink alerts |
+| Information disclosure in payment history | ❌ | ❌ | — | Authorization logic — beyond SAST |
+| Predictable reference numbers | ❌ | ❌ | — | Weak randomness — not flagged |
+| Transaction history exposure | ❌ | ❌ | — | Authorization logic — beyond SAST |
+| No validation on biller accounts | ❌ | ❌ | — | Business logic — beyond SAST |
+| Race conditions in payment processing | ❌ | ❌ | — | Concurrency — beyond SAST |
+| BOLA in payment history access | ❌ | ❌ | — | Authorization logic — beyond SAST |
+| Missing payment limits | ❌ | ❌ | — | Business logic — beyond SAST |
+
+### 9. AI Customer Support Vulnerabilities (10 vulnerabilities)
+
+| Vulnerability | CodeQL | Snyk Code | Secret Scanning | Why missed? |
+|---|:---:|:---:|:---:|---|
+| Prompt Injection (CWE-77) | ❌ | ❌ | — | LLM-specific — beyond SAST |
+| AI-based Information Disclosure (CWE-200) | ❌ | ❌ | — | LLM-specific — beyond SAST |
+| Broken Authorization in AI context (CWE-862) | ❌ | ❌ | — | LLM-specific — beyond SAST |
+| AI System Information Exposure (CWE-209) | ❌ | ❌ | — | LLM-specific — beyond SAST |
+| Insufficient Input Validation for AI (CWE-20) | ❌ | ❌ | — | LLM-specific — beyond SAST |
+| Direct Database Access through AI | ❌ | ❌ | — | LLM-specific — beyond SAST |
+| AI Role Override attacks | ❌ | ❌ | — | LLM-specific — beyond SAST |
+| Context Injection vulnerabilities | ❌ | ❌ | — | LLM-specific — beyond SAST |
+| AI-assisted unauthorized data access | ❌ | ❌ | — | LLM-specific — beyond SAST |
+| Exposed AI system prompts | ❌ | ❌ | — | LLM-specific — beyond SAST |
+
+### 10. GraphQL Vulnerabilities (6 vulnerabilities)
+
+| Vulnerability | CodeQL | Snyk Code | Secret Scanning | Why missed? |
+|---|:---:|:---:|:---:|---|
+| Enabled schema introspection | ❌ | ❌ | — | Config/design — needs GraphQL scanner |
+| Weak JWT auth inherited by `/graphql` | ❌ | ⚠️ | — | Snyk flags hardcoded JWT key (not specific to GraphQL) |
+| SQL injection in resolvers | ✅ | ✅ (3/5) | — | Snyk found 3 of 5 injection points; CodeQL groups at sink |
+| Missing depth/complexity controls | ❌ | ❌ | — | GraphQL-specific — beyond SAST |
+| Raw GraphQL error disclosure | ❌ | ❌ | — | CodeQL catches this pattern elsewhere but not in GraphQL handler |
+| Admin analytics exposure (BOLA) | ❌ | ❌ | — | Authorization logic — beyond SAST |
+
+### Additional: Secrets (from `.env` and source code)
+
+| Secret | CodeQL | Snyk Code | Secret Scanning |
+|---|:---:|:---:|:---:|
+| DeepSeek API key in `.env` | — | ❌ | ✅ |
+| JWT secret `"secret123"` in `auth.py` | ❌ | ✅ | ❌ |
+| Flask secret `"secret123"` in `app.py` | ❌ | ✅ | ❌ |
+
+### Coverage Summary
+
+| Category | Total Vulns | CodeQL | Snyk Code | Either Tool |
+|---|:---:|:---:|:---:|:---:|
+| 1. Authentication & Authorization | 9 | 1 | 3 (⚠️) | 3 |
+| 2. Data Security | 6 | 5 | 2 | 5 |
+| 3. Transaction Vulnerabilities | 6 | 0 | 0 | 0 |
+| 4. File Operations | 7 | 1 | 0 (⚠️) | 1 |
+| 5. Session Management | 4 | 0 | 1 | 1 |
+| 6. Client and Server-Side Flaws | 4 | 1 | 1 | 1 |
+| 7. Virtual Card Vulnerabilities | 11 | 0 | 0 | 0 |
+| 8. Bill Payment Vulnerabilities | 9 | 1 | 1 | 1 |
+| 9. AI Customer Support | 10 | 0 | 0 | 0 |
+| 10. GraphQL | 6 | 1 | 2 (⚠️) | 2 |
+| **Total** | **72** | **10** | **10** | **~14 unique** |
+
+> **~14 of 72 documented vulnerabilities** (~19%) are detected by at least one SAST tool.
+> The remaining 81% are business logic, authorization, concurrency, LLM-specific, or design flaws that SAST cannot detect.
+
+### Why is SAST coverage so low?
+
+| Root cause | Documented vulns affected | Example |
+|---|:---:|---|
+| **Business/authorization logic** | ~25 | BOLA, mass assignment, missing limits, no validation |
+| **Absence of controls** (not a code flaw) | ~15 | No rate limiting, no session expiry, no file size limits |
+| **Concurrency/race conditions** | ~4 | Race conditions in transfers, balance updates |
+| **LLM/AI-specific** | 10 | Prompt injection, AI role override |
+| **Client-side / runtime only** | ~4 | Token in localStorage, CSRF, token in URLs |
+| **Detectable by SAST** | **~14** | SQLi, XSS, SSRF, debug mode, hardcoded secrets, stack traces |
+
+SAST tools analyze source code for known dangerous patterns (taint flows, insecure API usage, hardcoded secrets). They cannot reason about missing logic, business rules, authorization policies, or AI/LLM behavior. This is expected — SAST is one layer in a defense-in-depth strategy.
+
+---
+
+## 2. Alert Totals
 
 | Metric | CodeQL | Snyk Code |
 |---|---|---|
@@ -50,11 +231,11 @@ Both CodeQL and Snyk Code were run against the same Python/Flask codebase. Toget
 
 ---
 
-## 2. Finding Categories — Side-by-Side
+## 3. Finding Categories — Side-by-Side
 
 | Vulnerability Category | CWE | Snyk Code | CodeQL | Found By |
 |---|---|:---:|:---:|---|
-| SQL Injection | CWE-89 | **25** | 6 | Both (same ~6 vulns; see [§3.1](#31-sql-injection)) |
+| SQL Injection | CWE-89 | **25** | 6 | Both (same ~6 vulns; see [§4.1](#41-sql-injection)) |
 | DOM-based Cross-site Scripting | CWE-79 | **22** | 4 | Both |
 | Stack Trace / Exception Exposure | CWE-209 | 0 | **39** | CodeQL only |
 | Full Server-Side Request Forgery | CWE-918 | 0 | **1** | CodeQL only |
@@ -67,11 +248,11 @@ Both CodeQL and Snyk Code were run against the same Python/Flask codebase. Toget
 | Workflow Missing Permissions | CWE-275 | 0 | **2** | CodeQL only |
 | Unpinned Action Tag | CWE-829 | 0 | **1** | CodeQL only |
 
-\* CodeQL does not include secret/credential detection rules — that is handled by **GitHub Secret Scanning**, a separate GHAS feature. See [Section 3.10](#310-secret-detection--snyk-code-sast-vs-github-secret-scanning) for a comparison of Snyk Code's secret findings vs GitHub Secret Scanning.
+\* CodeQL does not include secret/credential detection rules — that is handled by **GitHub Secret Scanning**, a separate GHAS feature. See [Section 4.10](#410-secret-detection--snyk-code-sast-vs-github-secret-scanning) for a comparison of Snyk Code's secret findings vs GitHub Secret Scanning.
 
 ---
 
-## 3. Detailed Finding-by-Finding Comparison
+## 4. Detailed Finding-by-Finding Comparison
 
 ### 3.1 SQL Injection
 
@@ -206,8 +387,8 @@ Both tools flag `app.run(debug=True)`. CodeQL's message is more specific ("may a
 
 | Finding | Rule ID | File | Assessment |
 |---|---|---|---|
-| **Hardcoded Cryptographic Key** | `python/HardcodedKey` | `auth.py:10` | **True positive.** JWT secret key (`"secret123"`) hardcoded in source. See [Section 3.10](#310-secret-detection--snyk-code-sast-vs-github-secret-scanning) for comparison with GitHub Secret Scanning. |
-| **Hardcoded Non-Crypto Secret** | `python/HardcodedNonCryptoSecret` | `app.py:48` | **True positive.** Flask `secret_key` (`"secret123"`) hardcoded. See [Section 3.10](#310-secret-detection--snyk-code-sast-vs-github-secret-scanning). |
+| **Hardcoded Cryptographic Key** | `python/HardcodedKey` | `auth.py:10` | **True positive.** JWT secret key (`"secret123"`) hardcoded in source. See [Section 4.10](#410-secret-detection--snyk-code-sast-vs-github-secret-scanning) for comparison with GitHub Secret Scanning. |
+| **Hardcoded Non-Crypto Secret** | `python/HardcodedNonCryptoSecret` | `app.py:48` | **True positive.** Flask `secret_key` (`"secret123"`) hardcoded. See [Section 4.10](#410-secret-detection--snyk-code-sast-vs-github-secret-scanning). |
 | **Insecure Cookie** | `python/WebCookieMissesCallToSetSecure` | `app.py:412` | **True positive.** Session cookie missing `Secure` attribute. CodeQL has this rule for other frameworks but didn't trigger for Flask here. |
 
 ### 3.9 CodeQL-Only Findings (CI/CD)
@@ -311,7 +492,7 @@ Snyk found 3 of 5 injection points. It missed the two where the f-string SQL is 
 
 ---
 
-## 4. Alert Grouping & Noise Analysis
+## 5. Alert Grouping & Noise Analysis
 
 This section evaluates how well each tool consolidates related findings to minimize alert fatigue.
 
@@ -351,7 +532,7 @@ This section evaluates how well each tool consolidates related findings to minim
 
 ---
 
-## 5. False Positive Analysis
+## 6. False Positive Analysis
 
 ### 5.1 Snyk Code False Positives
 
@@ -378,7 +559,7 @@ These are **accurate, well-grouped alerts**. By pointing at the sink, CodeQL giv
 
 ---
 
-## 6. Metadata & Severity Quality
+## 7. Metadata & Severity Quality
 
 | Dimension | CodeQL | Snyk Code |
 |---|---|---|
@@ -395,7 +576,7 @@ These are **accurate, well-grouped alerts**. By pointing at the sink, CodeQL giv
 
 ---
 
-## 7. File Coverage Comparison
+## 8. File Coverage Comparison
 
 | File | Snyk Alerts | CodeQL Alerts | Notes |
 |---|:---:|:---:|---|
@@ -419,7 +600,7 @@ These are **accurate, well-grouped alerts**. By pointing at the sink, CodeQL giv
 
 ---
 
-## 8. Precision vs Recall Summary
+## 9. Precision vs Recall Summary
 
 ### Precision (signal-to-noise ratio)
 
@@ -467,7 +648,7 @@ Both tools have significant noise, but for different reasons. CodeQL's noise is 
 
 ---
 
-## 9. Recommendations
+## 10. Recommendations
 
 ### Run Both Tools Together
 
