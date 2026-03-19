@@ -269,6 +269,48 @@ Snyk Code found **2 alerts**: both for the hardcoded string `"secret123"` used a
 
 **Verdict:** GitHub Secret Scanning and Snyk Code are fully complementary for secret detection. Secret Scanning catches real API keys/tokens by format, while Snyk Code catches hardcoded values used in security-sensitive code paths regardless of format. Running both is essential — together they found 3 secrets that neither tool alone would have fully covered.
 
+### 3.11 GraphQL Vulnerability Coverage
+
+The repository's `README.md` documents 6 intentionally implemented GraphQL vulnerabilities (Section 10). This section checks how many were detected by CodeQL and Snyk Code.
+
+#### Implemented Vulnerabilities vs Scanner Results
+
+| # | Documented Vulnerability | CWE | Snyk Code | CodeQL | Notes |
+|---|---|---|---|---|---|
+| 1 | **Enabled schema introspection** | CWE-200 | ❌ Not detected | ❌ Not detected | Neither tool flags GraphQL introspection being enabled. This is a configuration/design issue — SAST tools focus on code-level flaws, not API design decisions. Requires a dedicated GraphQL security scanner (e.g., InQL, graphql-cop). |
+| 2 | **Weak JWT-based authentication** inherited by `/graphql` | CWE-326 | ⚠️ Indirect | ⚠️ Indirect | The hardcoded JWT secret (`"secret123"` in `auth.py:10`) is flagged by Snyk (`python/HardcodedKey`). The `none` algorithm allowance is not flagged by either tool. Neither tool correlates the JWT weakness specifically to the `/graphql` endpoint. |
+| 3 | **SQL injection in GraphQL resolver query construction** | CWE-89 | ✅ Partial (3/5) | ✅ Grouped at sink | `transaction_graphql.py` has **5 f-string SQL injection points** (lines 45, 77, 105, 142, 143). **Snyk** flagged 3 — at the `execute_query()` call sites (lines 108, 145, 146) — but missed lines 45 and 77 (`_load_user_actor` and `_load_actor_by_account_number`). **CodeQL** groups these into its `database.py:255` sink alert (7 tracked paths), but does not identify them individually. |
+| 4 | **Missing GraphQL depth/complexity controls** | CWE-770 | ❌ Not detected | ❌ Not detected | Neither tool checks for query depth/complexity limits. This is a GraphQL-specific DoS concern that requires specialized analysis. |
+| 5 | **Raw GraphQL error disclosure** | CWE-209 | ❌ Not detected | ❌ Not detected | The endpoint at `app.py:250` passes raw `str(error)` to the JSON response. CodeQL has the `py/stack-trace-exposure` rule which catches this pattern elsewhere in `app.py`, but did not flag it inside the GraphQL handler. Snyk does not have an equivalent rule. |
+| 6 | **Transaction analytics exposure through admin-scoped queries** | CWE-862 | ❌ Not detected | ❌ Not detected | The authorization logic in `_resolve_scope` allows admins to query any account's data. Neither tool performs authorization-logic analysis — this is a business-logic flaw that requires manual review or DAST. |
+
+#### SQLi in GraphQL Resolvers — Detailed Breakdown
+
+The 5 SQL injection points in `transaction_graphql.py`:
+
+| Line | Function | Vulnerable Code | Snyk | CodeQL |
+|---|---|---|---|---|
+| 45 | `_load_user_actor` | `f"... WHERE id = {user_id}"` | ❌ Missed | Grouped into `database.py:255` |
+| 77 | `_load_actor_by_account_number` | `f"... WHERE account_number = '{account_number}'"` | ❌ Missed | Grouped into `database.py:255` |
+| 105→108 | `_load_transactions` | `f" WHERE from_account = '{scoped_account_number}' ..."` → `execute_query(query)` | ✅ Line 108 | Grouped into `database.py:255` |
+| 142→145 | `_load_lending_and_bill_metrics` | `f" WHERE user_id = {scoped_user_id}"` → `execute_query(loan_query)` | ✅ Line 145 | Grouped into `database.py:255` |
+| 143→146 | `_load_lending_and_bill_metrics` | `f" AND bp.user_id = {scoped_user_id}"` → `execute_query(bill_query)` | ✅ Line 146 | Grouped into `database.py:255` |
+
+Snyk found 3 of 5 injection points. It missed the two where the f-string SQL is constructed and immediately passed to `execute_query()` in a single function (`_load_user_actor` at line 45 and `_load_actor_by_account_number` at line 77). The 3 it found are in functions where the SQL is built across multiple lines before being passed to `execute_query()`.
+
+#### Summary
+
+| Metric | Value |
+|---|---|
+| Documented GraphQL vulnerabilities | **6** |
+| Fully detected by either tool | **1** (SQLi — partial) |
+| Partially detected | **2** (SQLi resolvers, JWT weakness) |
+| Not detected by either tool | **3** (introspection, depth limits, error disclosure) |
+| Not detectable by SAST | **2** (depth/complexity, authorization logic) |
+| **SAST detection rate** | **1.5 out of 4 detectable = ~38%** |
+
+**Key takeaway:** SAST tools (both CodeQL and Snyk Code) catch only the SQL injection pattern among the 6 documented GraphQL vulnerabilities — and even then incompletely. Introspection, depth/complexity, error disclosure in GraphQL handlers, and authorization-logic flaws fall outside SAST capabilities. A comprehensive GraphQL security assessment requires complementary tooling: DAST (for introspection/auth testing), dedicated GraphQL scanners (for depth/complexity), and manual code review (for business-logic authorization).
+
 ---
 
 ## 4. Alert Grouping & Noise Analysis
