@@ -78,3 +78,11 @@ jobs:
         if: always()
         with:
           sarif_file: snyk-code.sarif
+
+      # Upload the SARIF file as a downloadable artifact
+      - name: Upload SARIF artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: snyk-code-sarif
+          path: snyk-code.sarif
