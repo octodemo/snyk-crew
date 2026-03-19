@@ -14,7 +14,7 @@ Both CodeQL and Snyk Code were run against the same Python/Flask codebase. Toget
 
 **Snyk Code** (52 alerts) excels at **taint-path enumeration and XSS detection**. For SQL injection, its 25 alerts are not 25 distinct vulnerabilities — they are 25 individual taint paths that converge on the same ~6 vulnerable sinks that CodeQL also identifies. This source-level reporting inflates the apparent count but provides useful detail about which callers trigger each vulnerability. For XSS, Snyk genuinely finds 5× more locations than CodeQL (22 vs 4). However, it **does not populate severity levels** (all 52 show as `null`), misses several high-impact categories entirely (SSRF, sensitive data logging, CI/CD misconfigurations), and produces false positives on properly parameterized SQL queries.
 
-**On alert grouping and noise:** The two tools have opposite grouping problems. CodeQL's 39 identical stack-trace-exposure alerts are its worst noise source (70% of all alerts). But for SQL injection, **CodeQL's sink-level grouping is superior** — it consolidates 7+ taint paths into a single actionable alert at `database.py:255`, whereas Snyk creates 17 separate alerts for the same sink. Snyk's source-level approach gives developers better visibility into individual call sites but generates 4× more alerts for the same set of vulnerabilities. See the [Alert Grouping & Noise Analysis](#alert-grouping--noise-analysis) section for a detailed breakdown.
+**On alert grouping and noise:** For SQL injection, **CodeQL's sink-level grouping is superior** — it consolidates 7+ taint paths into a single actionable alert at `database.py:255`, whereas Snyk creates 17 separate alerts for the same sink. For stack-trace exposure (CWE-209), CodeQL's 39 identical alerts are noisy, but Snyk **failed to detect this vulnerability category entirely** — 39 noisy alerts is better than zero. Snyk's source-level SQLi approach gives developers call-site detail but generates 4× more alerts for the same set of vulnerabilities. See the [Alert Grouping & Noise Analysis](#alert-grouping--noise-analysis) section for a detailed breakdown.
 
 **Bottom line:** Run both. Use CodeQL for severity-based triage and broad category coverage. Use Snyk Code for XSS detection (dramatically better) and for understanding which specific call sites trigger SQL injection vulnerabilities that CodeQL groups at the sink level.
 
@@ -151,9 +151,7 @@ All 21 Snyk alerts in `app.py` and `transaction_graphql.py` flow through the imp
 
 Every `except` block that returns `str(e)` to the HTTP client is flagged. The 39 alerts share an **identical message**: *"Stack trace information flows to this location and may be exposed to an external user."* While each points to a distinct code location, the root cause is a single systemic pattern: the application exposes exception details in JSON error responses.
 
-**This is CodeQL's biggest noise contributor** — 39 alerts of the same pattern constitute 70% of all CodeQL findings and 36% of all alerts across both tools. See [Section 4](#4-alert-grouping--noise-analysis) for detailed noise analysis.
-
-Snyk Code does not have an equivalent rule and ignores this category entirely.
+**This is CodeQL's noisiest rule** — 39 alerts of the same pattern constitute 70% of all CodeQL findings and 36% of all alerts across both tools. However, the noise criticism must be weighed against the fact that **Snyk Code does not detect this vulnerability category at all**. A noisy detection is strictly better than no detection — these are real information-disclosure vulnerabilities (CWE-209). CodeQL's problem here is presentation (should consolidate into fewer alerts), not accuracy.
 
 ### 3.4 Full Server-Side Request Forgery (SSRF)
 
@@ -321,7 +319,7 @@ This section evaluates how well each tool consolidates related findings to minim
 
 | Aspect | Assessment | Impact |
 |---|---|---|
-| **Stack trace exposure** (39 alerts) | ❌ **Very noisy.** All 39 alerts have the identical message, identical rule, identical severity. They represent a single systemic pattern (`return str(e)` in `except` blocks) but are reported as 39 separate alerts. A single alert with "39 instances" would be far more effective. | 39 alerts that could be 1. This makes the alert dashboard appear dominated by medium-severity noise, burying the 1 critical and 13 high findings. |
+| **Stack trace exposure** (39 alerts) | ⚠️ **Noisy but valuable.** All 39 alerts have identical messages for the same systemic pattern (`return str(e)` in `except` blocks). Better grouping (e.g., 1 alert with "39 instances") would improve UX. But this is a real vulnerability class (CWE-209) that **Snyk missed entirely** — noisy detection beats no detection. | 39 alerts that could be grouped better, but represent genuine findings that only CodeQL catches. |
 | **XSS dual-rule overlap** (4 alerts → 2 locations) | ⚠️ **Minor duplication.** `js/xss` and `js/xss-through-dom` fire on the exact same lines (`blog.html:195`, `careers.html:223`). While the rules describe slightly different vulnerability mechanics, from a developer's perspective these are the same issue requiring the same fix. | 4 alerts that could be 2. Minor noise but still unnecessary duplication. |
 | **SQL injection** (6 alerts) | ✅ **Excellent grouping.** 2 alerts at `database.py` sinks consolidate 7+3=10 taint paths into just 2 alerts. The 4 `auth.py` alerts are distinct direct `cursor.execute` calls. This is the gold standard for reducing triage burden. | 6 alerts for ~6 distinct fixable issues. Ideal. |
 | **Other rules** (7 alerts) | ✅ **Well-grouped.** SSRF, debug mode, cert validation, logging, CI/CD — all one alert per distinct issue. | Clean. |
@@ -342,14 +340,14 @@ This section evaluates how well each tool consolidates related findings to minim
 
 | Dimension | CodeQL | Snyk Code | Winner |
 |---|---|---|---|
-| **Alerts per distinct issue** | ~3.3× (56 alerts / ~17 issues) | ~1.7× (52 alerts / ~30 issues) | **CodeQL for SQLi, Snyk for stack-trace** |
+| **Alerts per distinct issue** | ~3.3× (56 alerts / ~17 issues) | ~1.7× (52 alerts / ~30 issues) | **CodeQL** (better for SQLi) |
 | **SQL injection grouping** | 6 alerts for ~6 issues (1:1) | 25 alerts for ~6 issues (4:1 inflation) | **CodeQL** |
-| **Stack trace grouping** | 39 alerts for 1 systemic issue (39:1) | N/A (not detected) | ❌ **CodeQL's worst area** |
+| **Stack trace detection** | 39 alerts (noisy but detected) | 0 alerts (missed entirely) | **CodeQL** — noisy beats absent |
 | **XSS rule deduplication** | 2 rules on same line (2:1) | 1 rule per location (1:1) | **Snyk** |
 | **Message diversity** | Identical messages for same rule | Varies by taint source | **Snyk** |
-| **Developer triage experience** | Good for SQLi, poor for stack-traces | Good for XSS, inflated for SQLi | **Mixed — each has a weak spot** |
+| **Developer triage experience** | Good for SQLi, noisy for stack-traces | Good for XSS, inflated for SQLi | **Mixed** |
 
-**Verdict:** Neither tool is clearly better at grouping overall. CodeQL's SQL injection grouping is excellent (6 alerts for ~6 fixable issues vs Snyk's 25), but its stack-trace-exposure explosion (39 identical alerts) is the single worst noise source across both tools. Snyk's XSS grouping is clean (1 alert per distinct sink), but its source-level SQLi reporting inflates the count 4× vs CodeQL. A team using both tools needs to understand that **Snyk's 25 SQLi alerts ≈ CodeQL's 6 SQLi alerts** in terms of actual work required.
+**Verdict:** CodeQL is the stronger tool on grouping overall. Its SQL injection sink-level grouping is excellent (6 alerts vs Snyk's 25 for the same issues), and it is the **only tool to detect stack-trace exposure at all** — Snyk has zero coverage of this category. Yes, 39 identical alerts is noisy, but 39 noisy alerts is strictly better than 0 alerts for a real vulnerability class (CWE-209). CodeQL's only grouping weakness is presentation — it should consolidate those 39 into fewer alerts. Snyk's XSS grouping is clean (1 alert per sink), but its SQLi source-level reporting inflates the count 4×. A team using both tools needs to understand that **Snyk's 25 SQLi alerts ≈ CodeQL's 6 SQLi alerts** in terms of actual work required.
 
 ---
 
@@ -460,7 +458,7 @@ Both tools have significant noise, but for different reasons. CodeQL's noise is 
 | Critical/high-severity finds | **SSRF (critical), password logging (high)** | Hardcoded key, insecure cookie | **CodeQL** |
 | Secret detection (vs GitHub Secret Scanning) | N/A — GitHub Secret Scanning found 1 API key (DeepSeek) in `.env` | **2 hardcoded secrets** in source code (`auth.py`, `app.py`) — zero overlap with Secret Scanning | **Complementary** |
 | Alert grouping (SQLi) | **Excellent** (sink-level) | Poor (source-level inflation) | **CodeQL** |
-| Alert grouping (stack-trace) | Poor (39 identical alerts) | N/A | ❌ **CodeQL's worst area** |
+| Alert grouping (stack-trace) | 39 alerts — noisy but detected | **0 alerts — missed entirely** | **CodeQL** — noise > silence |
 | Severity classification | **✅ Populated** | ❌ All null | **CodeQL** |
 | Taint-flow message quality | Generic | **Specific per-source** | **Snyk** |
 | CWE references | **✅ Standard CWEs** | Tags only | **CodeQL** |
