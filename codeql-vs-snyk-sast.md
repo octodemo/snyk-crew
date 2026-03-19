@@ -54,18 +54,20 @@ Both CodeQL and Snyk Code were run against the same Python/Flask codebase. Toget
 
 | Vulnerability Category | CWE | Snyk Code | CodeQL | Found By |
 |---|---|:---:|:---:|---|
-| SQL Injection | CWE-89 | **25** | 6 | Both |
+| SQL Injection | CWE-89 | **25** | 6 | Both (same ~6 vulns; see [§3.1](#31-sql-injection)) |
 | DOM-based Cross-site Scripting | CWE-79 | **22** | 4 | Both |
 | Stack Trace / Exception Exposure | CWE-209 | 0 | **39** | CodeQL only |
 | Full Server-Side Request Forgery | CWE-918 | 0 | **1** | CodeQL only |
 | Clear-text Logging of Passwords | CWE-532 | 0 | **1** | CodeQL only |
 | Request Without Cert Validation | CWE-295 | 1 | 1 | Both |
 | Flask Debug Mode Enabled | CWE-215 | 1 | 1 | Both |
-| Hardcoded Cryptographic Key | CWE-321 | **1** | 0 | Snyk only |
-| Hardcoded Non-Crypto Secret | CWE-798 | **1** | 0 | Snyk only |
+| Hardcoded Cryptographic Key\* | CWE-321 | **1** | 0 | Snyk only (CodeQL does not do secret detection) |
+| Hardcoded Non-Crypto Secret\* | CWE-798 | **1** | 0 | Snyk only (CodeQL does not do secret detection) |
 | Insecure Cookie (missing `Secure`) | CWE-614 | **1** | 0 | Snyk only |
 | Workflow Missing Permissions | CWE-275 | 0 | **2** | CodeQL only |
 | Unpinned Action Tag | CWE-829 | 0 | **1** | CodeQL only |
+
+\* CodeQL does not include secret/credential detection rules — that is handled by **GitHub Secret Scanning**, a separate GHAS feature. See [Section 3.10](#310-secret-detection--snyk-code-sast-vs-github-secret-scanning) for a comparison of Snyk Code's secret findings vs GitHub Secret Scanning.
 
 ---
 
@@ -206,8 +208,8 @@ Both tools flag `app.run(debug=True)`. CodeQL's message is more specific ("may a
 
 | Finding | Rule ID | File | Assessment |
 |---|---|---|---|
-| **Hardcoded Cryptographic Key** | `python/HardcodedKey` | `auth.py:10` | **High-quality true positive.** JWT secret key hardcoded in source — critical for production. CodeQL has no equivalent rule for Python. |
-| **Hardcoded Non-Crypto Secret** | `python/HardcodedNonCryptoSecret` | `app.py:48` | **True positive.** Application secret hardcoded. |
+| **Hardcoded Cryptographic Key** | `python/HardcodedKey` | `auth.py:10` | **True positive.** JWT secret key (`"secret123"`) hardcoded in source. See [Section 3.10](#310-secret-detection--snyk-code-sast-vs-github-secret-scanning) for comparison with GitHub Secret Scanning. |
+| **Hardcoded Non-Crypto Secret** | `python/HardcodedNonCryptoSecret` | `app.py:48` | **True positive.** Flask `secret_key` (`"secret123"`) hardcoded. See [Section 3.10](#310-secret-detection--snyk-code-sast-vs-github-secret-scanning). |
 | **Insecure Cookie** | `python/WebCookieMissesCallToSetSecure` | `app.py:412` | **True positive.** Session cookie missing `Secure` attribute. CodeQL has this rule for other frameworks but didn't trigger for Flask here. |
 
 ### 3.9 CodeQL-Only Findings (CI/CD)
@@ -219,6 +221,53 @@ Both tools flag `app.run(debug=True)`. CodeQL's message is more specific ("may a
 | Unpinned 3rd-party action tag | `actions/unpinned-tag` | `deploy.yml` | medium |
 
 These are **supply-chain and CI/CD hardening** findings that Snyk Code does not cover at all (Snyk's SAST focuses on application code, not workflow files).
+
+### 3.10 Secret Detection — Snyk Code (SAST) vs GitHub Secret Scanning
+
+CodeQL does not perform secret scanning — that is handled by **GitHub Secret Scanning**, a separate GitHub Advanced Security feature. This section compares Snyk Code's hardcoded-secret SAST rules against GitHub Secret Scanning's results on this repository.
+
+#### GitHub Secret Scanning Results
+
+| # | Secret Type | File | Line | Validity | State |
+|---|---|---|---|---|---|
+| 1 | DeepSeek API Key | `.env` (commit history) | 6 | Unknown | Open |
+
+GitHub Secret Scanning found **1 alert**: a DeepSeek API key committed in the `.env` file. This is a real API key matching a known provider pattern (`deepseek_api_key`). The alert was detected at the commit level — even though `.env` may be in `.gitignore`, the key exists in Git history.
+
+#### Snyk Code Secret-Related Results
+
+| # | Rule | File | Line | Description |
+|---|---|---|---|---|
+| 1 | `python/HardcodedKey` | `auth.py` | 10 | JWT secret `"secret123"` used as cryptographic key in `jwt.decode()` |
+| 2 | `python/HardcodedNonCryptoSecret` | `app.py` | 48 | Flask `app.secret_key = "secret123"` — application secret hardcoded |
+
+Snyk Code found **2 alerts**: both for the hardcoded string `"secret123"` used as a JWT signing key and a Flask session secret.
+
+#### Comparison
+
+| Dimension | GitHub Secret Scanning | Snyk Code (SAST) |
+|---|---|---|
+| **What it detects** | Known secret patterns from 200+ providers (API keys, tokens, passwords in specific formats) | Hardcoded strings used in security-sensitive contexts (crypto keys, secret assignments) |
+| **Detection method** | Pattern matching against known provider formats | Semantic analysis of how strings are used in code |
+| **Scope** | Full Git history (all commits, including deleted files) | Current code snapshot only |
+| **DeepSeek API key in `.env`** | ✅ Found | ❌ Missed |
+| **JWT secret `"secret123"` in `auth.py`** | ❌ Missed | ✅ Found |
+| **Flask secret `"secret123"` in `app.py`** | ❌ Missed | ✅ Found |
+| **Total secrets found** | 1 | 2 |
+| **Overlap** | 0 | 0 |
+
+**Zero overlap** — the tools detect completely different classes of secrets:
+
+- **GitHub Secret Scanning** identifies the DeepSeek API key because it matches a known provider pattern (format: `sk-*`). It does not flag `"secret123"` because generic short strings don't match any provider's key format — there's no way to distinguish a hardcoded test value from a legitimate constant without semantic context.
+
+- **Snyk Code** flags `"secret123"` because it performs semantic analysis: it sees a string literal flowing into `jwt.decode()` (cryptographic operation) and `app.secret_key` (security-sensitive field). It does not flag the DeepSeek API key because that key lives in `.env`, which Snyk Code's SAST scan doesn't analyze (it focuses on application source code, not configuration files).
+
+**Combined, the three secrets detected are:**
+1. **DeepSeek API key** in `.env` — GitHub Secret Scanning only
+2. **JWT signing key** `"secret123"` in `auth.py:10` — Snyk Code only
+3. **Flask session secret** `"secret123"` in `app.py:48` — Snyk Code only
+
+**Verdict:** GitHub Secret Scanning and Snyk Code are fully complementary for secret detection. Secret Scanning catches real API keys/tokens by format, while Snyk Code catches hardcoded values used in security-sensitive code paths regardless of format. Running both is essential — together they found 3 secrets that neither tool alone would have fully covered.
 
 ---
 
@@ -351,7 +400,8 @@ Both tools have significant noise, but for different reasons. CodeQL's noise is 
 | SQLi taint paths traced | 14 | **21** |
 | XSS distinct locations | 2 | **22** |
 | Unique high/critical findings only it found | **3** (SSRF, password logging, clear-text logging) | **3** (hardcoded key, hardcoded secret, insecure cookie) |
-| Vulnerability categories covered | **10** | 7 |
+| Secret detection | N/A (separate tool: GitHub Secret Scanning) | **2** (hardcoded crypto key + app secret) |
+| Vulnerability categories covered | **10** (no secret detection) | 7 (includes hardcoded secrets) |
 | **Recall for SQLi** | **Equal** (same vulns, fewer paths) | **Equal** (same vulns, more paths) |
 | **Recall for XSS** | Low | **High** |
 | **Recall across all categories** | **High** | Moderate |
@@ -366,6 +416,7 @@ Both tools have significant noise, but for different reasons. CodeQL's noise is 
 | XSS detection | 2 unique locations | **22 locations** | **Snyk** |
 | Breadth of categories | **10 categories** | 7 categories | **CodeQL** |
 | Critical/high-severity finds | **SSRF (critical), password logging (high)** | Hardcoded key, insecure cookie | **CodeQL** |
+| Secret detection (vs GitHub Secret Scanning) | N/A — GitHub Secret Scanning found 1 API key (DeepSeek) in `.env` | **2 hardcoded secrets** in source code (`auth.py`, `app.py`) — zero overlap with Secret Scanning | **Complementary** |
 | Alert grouping (SQLi) | **Excellent** (sink-level) | Poor (source-level inflation) | **CodeQL** |
 | Alert grouping (stack-trace) | Poor (39 identical alerts) | N/A | ❌ **CodeQL's worst area** |
 | Severity classification | **✅ Populated** | ❌ All null | **CodeQL** |
