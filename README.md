@@ -295,7 +295,7 @@ The application uses PostgreSQL. The database will be automatically initialized 
      # Use the generated password, or immediately reset it:
      & 'C:\Program Files\PostgreSQL\17\bin\psql.exe' -U postgres -c "ALTER ROLE postgres WITH PASSWORD 'postgres';"
      ```
-
+testin
 4. Database does not exist:
 
    * Create it manually with:
