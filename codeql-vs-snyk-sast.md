@@ -10,13 +10,13 @@
 
 Both CodeQL and Snyk Code were run against the same Python/Flask codebase. Together they produced 108 open alerts. **They are strongly complementary — neither tool alone provides adequate coverage.**
 
-**CodeQL** (56 alerts) excels at **breadth and precision**. It covers 10 distinct vulnerability categories, assigns accurate severity levels (1 critical, 13 high, 42 medium), and provides CWE references for every finding. It is the only tool to detect the critical SSRF vulnerability and the clear-text password logging issue. However, it severely under-reports SQL injection (6 vs Snyk's 25) and XSS (4 vs Snyk's 22), and its 39 stack-trace-exposure alerts — all with identical messages — create significant noise that hurts triage efficiency.
+**CodeQL** (56 alerts) excels at **breadth, precision, and grouping**. It covers 10 distinct vulnerability categories, assigns accurate severity levels (1 critical, 13 high, 42 medium), and provides CWE references for every finding. It is the only tool to detect the critical SSRF vulnerability and the clear-text password logging issue. For SQL injection, CodeQL groups multiple taint paths into a single alert at the vulnerable sink — producing 6 well-organized alerts that cover the same underlying vulnerabilities as Snyk's 25. However, its 39 stack-trace-exposure alerts — all with identical messages — create significant noise that hurts triage efficiency.
 
-**Snyk Code** (52 alerts) excels at **depth in injection-flaw detection**. It finds 4× more SQL injection and 5× more XSS locations than CodeQL. Its taint-flow messages are descriptive and vary by source type. However, it **does not populate severity levels** (all 52 show as `null`), misses several high-impact categories entirely (SSRF, sensitive data logging, CI/CD misconfigurations), and produces false positives on properly parameterized SQL queries.
+**Snyk Code** (52 alerts) excels at **taint-path enumeration and XSS detection**. For SQL injection, its 25 alerts are not 25 distinct vulnerabilities — they are 25 individual taint paths that converge on the same ~6 vulnerable sinks that CodeQL also identifies. This source-level reporting inflates the apparent count but provides useful detail about which callers trigger each vulnerability. For XSS, Snyk genuinely finds 5× more locations than CodeQL (22 vs 4). However, it **does not populate severity levels** (all 52 show as `null`), misses several high-impact categories entirely (SSRF, sensitive data logging, CI/CD misconfigurations), and produces false positives on properly parameterized SQL queries.
 
-**On alert grouping and noise:** CodeQL is significantly noisier — 70% of its alerts (39/56) are a single repeated pattern (`py/stack-trace-exposure`) with identical messages. Snyk avoids this problem entirely; its alerts are diverse and each points to a distinct code location with a distinct taint flow. However, CodeQL's dual XSS rules (`js/xss` + `js/xss-through-dom`) on the same line are a minor de-duplication issue, while Snyk consolidates XSS under one rule ID. See the [Alert Grouping & Noise Analysis](#alert-grouping--noise-analysis) section for a detailed breakdown.
+**On alert grouping and noise:** The two tools have opposite grouping problems. CodeQL's 39 identical stack-trace-exposure alerts are its worst noise source (70% of all alerts). But for SQL injection, **CodeQL's sink-level grouping is superior** — it consolidates 7+ taint paths into a single actionable alert at `database.py:255`, whereas Snyk creates 17 separate alerts for the same sink. Snyk's source-level approach gives developers better visibility into individual call sites but generates 4× more alerts for the same set of vulnerabilities. See the [Alert Grouping & Noise Analysis](#alert-grouping--noise-analysis) section for a detailed breakdown.
 
-**Bottom line:** Run both. Use CodeQL for severity-based triage and broad category coverage. Use Snyk Code for deep injection-flaw detection. Together they catch vulnerabilities that either tool alone would miss.
+**Bottom line:** Run both. Use CodeQL for severity-based triage and broad category coverage. Use Snyk Code for XSS detection (dramatically better) and for understanding which specific call sites trigger SQL injection vulnerabilities that CodeQL groups at the sink level.
 
 ---
 
@@ -76,21 +76,48 @@ Both CodeQL and Snyk Code were run against the same Python/Flask codebase. Toget
 | | Snyk Code | CodeQL |
 |---|---|---|
 | Rule ID | `python/Sqli` | `py/sql-injection` |
-| Total alerts | **25** | 6 |
+| Total alerts | 25 | 6 |
+| Grouping strategy | **One alert per source (caller)** | **One alert per sink, multiple paths grouped** |
 | Files | `app.py` (18), `auth.py` (4), `transaction_graphql.py` (3) | `auth.py` (4), `database.py` (2) |
 | Severity | null | high |
 | CWE | Tags: `Sqli, Taint, SourceHttpParam` | `external/cwe/cwe-089` |
 
-**Line-level overlap:**
+**Critical insight: same vulnerabilities, different grouping.**
 
-- **4 shared locations** — all in `auth.py` (lines 121, 157, 191, 195). Both tools correctly flag f-string SQL queries like `f"SELECT * FROM users WHERE username='{username}'"`.
-- **21 Snyk-only locations** — 18 in `app.py`, 3 in `transaction_graphql.py`. These include:
-  - **True positives** (majority): `app.py:487` (`f"SELECT ... WHERE account_number='{account_number}'"`) — classic f-string injection. Similarly lines 596, 1128, 1155, 1254, 1304, 1352, 1590, 1641, 1828, 2076, 2104 all use f-strings or string concatenation to build SQL.
-  - **True positive with nuance**: `app.py:325` — uses `%s` for values but dynamically builds column names from user input (`', '.join(fields)` where `fields` comes from `user_data.items()`). This is a real SQL injection via column-name manipulation that CodeQL missed.
-  - **False positives**: `app.py:551`, `app.py:991`, `app.py:2185` — all call `execute_transaction()` with properly parameterized queries using `%s` placeholders. User input flows only into parameter tuples, never into the SQL string itself. Snyk flags these because it traces taint to the `cursor.execute()` sink without recognizing that parameterized queries neutralize the injection.
-- **2 CodeQL-only locations** — both in `database.py` (lines 255, 280). These flag the generic `cursor.execute(query, params)` functions themselves — the execution sinks. While technically these are the code points where injection occurs, they are **low-signal** because the vulnerability depends entirely on how callers construct the `query` argument. These are sink-level findings, not source-level findings.
+The 25 Snyk alerts and 6 CodeQL alerts cover **the same set of underlying vulnerabilities**. The 4× difference in alert count is almost entirely due to how each tool groups taint paths, not a difference in detection capability.
 
-**Verdict:** Snyk has far superior recall (25 vs 6), catching 21 real injection points that CodeQL misses entirely across `app.py`. CodeQL's dataflow analysis is too conservative here — it successfully traces taint through `auth.py` but fails to follow it through the larger `app.py` call chains. However, Snyk's ~3 false positives on parameterized queries show it doesn't fully resolve safe parameterization patterns.
+**How the alerts map to each other:**
+
+| CodeQL Alert | CodeQL Sink | Paths in CodeQL | Snyk Alerts to Same Sink | Snyk Source Lines |
+|---|---|:---:|:---:|---|
+| `#10` | `database.py:255` (`execute_query`) | 7 | **17** | `app.py`: 325, 380, 487, 596, 1128, 1155, 1254, 1304, 1352, 1590, 1641, 1828, 2076, 2104 + `transaction_graphql.py`: 108, 145, 146 |
+| `#11` | `database.py:280` (`execute_transaction`) | 3 | **4** | `app.py`: 551, 991, 1975, 2185 |
+| `#6–9` | `auth.py`: 121, 157, 191, 195 (direct `cursor.execute`) | 1 each | **4** (1:1 match) | `auth.py`: 121, 157, 191, 195 |
+| **Total** | | **14 paths** | **25 alerts** | |
+
+All 21 Snyk alerts in `app.py` and `transaction_graphql.py` flow through the imported `execute_query()` or `execute_transaction()` functions from `database.py` — the same two sinks that CodeQL groups into just 2 alerts. The 4 `auth.py` alerts are 1:1 matches because `auth.py` uses direct `sqlite3.cursor.execute()` calls (not the shared `database.py` functions).
+
+**CodeQL's approach (sink-level grouping):**
+- Alert at `database.py:255` says *"This SQL query depends on a user-provided value"* — repeated **7 times** in the message, once per traced taint path.
+- A developer sees: "this `execute_query` function is vulnerable via 7 different callers" → **one issue to fix** (make the function safe or fix all callers).
+- Limitation: CodeQL only traced 7 of the ~17 paths to this sink — it missed paths from `transaction_graphql.py` and several `app.py` routes.
+
+**Snyk's approach (source-level reporting):**
+- Each caller gets its own alert with a specific message like *"Unsanitized input from the HTTP request body flows into database.execute_query"* or *"Unsanitized input from an HTTP parameter flows into execute"*.
+- A developer sees 17 separate alerts that all require fixing the same sink function → **more granular but noisier**.
+- Advantage: Snyk traces more paths (21 vs CodeQL's 10), and its messages distinguish the source type ("HTTP request body", "HTTP parameter", "database") — useful for understanding each entry point.
+- Disadvantage: 17 alerts for 1 vulnerable function creates triage fatigue and inflates the apparent vulnerability count.
+- **False positives remain:** `app.py:551`, `app.py:991`, `app.py:2185` call `execute_transaction()` with properly `%s`-parameterized queries — Snyk flags these because it traces taint to the sink without recognizing that parameterization neutralizes the injection.
+
+**Actual unique vulnerabilities to fix: ~6**
+1. `auth.py:121` — direct `cursor.execute` with f-string
+2. `auth.py:157` — direct `cursor.execute` with f-string
+3. `auth.py:191` — direct `cursor.execute` with f-string
+4. `auth.py:195` — direct `cursor.execute` with f-string
+5. `database.py:255` / `execute_query` callers — all `app.py` and `transaction_graphql.py` routes that pass f-string queries to this function
+6. `database.py:280` / `execute_transaction` callers — routes that pass f-string queries to this function
+
+**Verdict:** Both tools detect the same core SQL injection vulnerabilities. CodeQL's sink-level grouping provides a significantly better developer experience (6 alerts vs 25 for the same issues). Snyk's source-level reporting provides better path enumeration (traces 21 paths vs CodeQL's 10) and source-type detail, but at the cost of 4× alert inflation. For SQL injection specifically, **CodeQL's grouping is the superior UX**.
 
 ### 3.2 Cross-site Scripting (XSS)
 
@@ -205,32 +232,33 @@ This section evaluates how well each tool consolidates related findings to minim
 |---|---|---|
 | **Stack trace exposure** (39 alerts) | ❌ **Very noisy.** All 39 alerts have the identical message, identical rule, identical severity. They represent a single systemic pattern (`return str(e)` in `except` blocks) but are reported as 39 separate alerts. A single alert with "39 instances" would be far more effective. | 39 alerts that could be 1. This makes the alert dashboard appear dominated by medium-severity noise, burying the 1 critical and 13 high findings. |
 | **XSS dual-rule overlap** (4 alerts → 2 locations) | ⚠️ **Minor duplication.** `js/xss` and `js/xss-through-dom` fire on the exact same lines (`blog.html:195`, `careers.html:223`). While the rules describe slightly different vulnerability mechanics, from a developer's perspective these are the same issue requiring the same fix. | 4 alerts that could be 2. Minor noise but still unnecessary duplication. |
-| **SQL injection** (6 alerts) | ✅ **Well-grouped.** Each alert is a distinct code location. No duplication. | Clean. |
+| **SQL injection** (6 alerts) | ✅ **Excellent grouping.** 2 alerts at `database.py` sinks consolidate 7+3=10 taint paths into just 2 alerts. The 4 `auth.py` alerts are distinct direct `cursor.execute` calls. This is the gold standard for reducing triage burden. | 6 alerts for ~6 distinct fixable issues. Ideal. |
 | **Other rules** (7 alerts) | ✅ **Well-grouped.** SSRF, debug mode, cert validation, logging, CI/CD — all one alert per distinct issue. | Clean. |
 
-**CodeQL noise score: 41 unnecessary alerts out of 56 total (73% noise).** If CodeQL grouped the stack-trace findings into one and de-duplicated the XSS rules, the alert count would drop from 56 to ~17 — each representing a genuinely distinct issue.
+**CodeQL noise score: 41 unnecessary alerts out of 56 total (73% noise).** If CodeQL grouped the stack-trace findings into one and de-duplicated the XSS rules, the alert count would drop from 56 to ~17 — each representing a genuinely distinct issue. However, its SQL injection grouping is excellent and should be the model for other rules.
 
 ### 4.2 Snyk Code Grouping Assessment
 
 | Aspect | Assessment | Impact |
 |---|---|---|
-| **SQL injection** (25 alerts) | ✅ **Good granularity.** Each alert points to a different code location. The taint-flow messages vary meaningfully: "Unsanitized input from the HTTP request body", "from an HTTP parameter", "from a database" — helping developers understand the specific data flow. | 25 distinct code locations, each with a unique taint path. Appropriate. |
-| **DOM XSS** (22 alerts) | ✅ **Good granularity.** Each alert points to a different `innerHTML` sink. The source description varies ("from the document location" vs "from data from a remote resource"), providing useful triage context. All under a single rule ID (`javascript/DOMXSS`) — no rule duplication. | 22 distinct code locations. Clean. |
+| **SQL injection** (25 alerts) | ⚠️ **Over-reported.** The 25 alerts map to only ~6 distinct vulnerabilities. 17 alerts in `app.py` all flow to the same `execute_query()` sink, and 4 flow to `execute_transaction()`. Each alert is a different call site, but a developer fixing the sink function would resolve all of them at once. The varied taint-source messages ("HTTP request body", "HTTP parameter", "database") add useful context, but at the cost of 4× alert inflation vs CodeQL's sink-grouped approach. | 25 alerts for ~6 fixable issues. Creates an inflated impression of vulnerability count. |
+| **DOM XSS** (22 alerts) | ✅ **Good granularity.** Unlike SQLi, each XSS alert points to a genuinely different `innerHTML` sink — these are distinct code locations that each need their own fix. All under a single rule ID (`javascript/DOMXSS`) — no rule duplication. | 22 distinct code locations. Appropriate. |
 | **Other rules** (5 alerts) | ✅ **Excellent.** Each is a unique finding with a unique message. | No noise. |
 
-**Snyk Code noise score: ~3 false positives out of 52 total (6% noise).** Snyk's only noise comes from the ~3 false positive SQLi alerts on parameterized queries, not from poor grouping. Every alert ID maps to a distinct code location.
+**Snyk Code noise score: ~22 inflated alerts out of 52 total (~42% inflation).** The 25 SQLi alerts represent ~6 distinct issues (~19 excess), plus ~3 false positives on parameterized queries. The XSS and other findings are well-calibrated.
 
 ### 4.3 Grouping Comparison Summary
 
 | Dimension | CodeQL | Snyk Code | Winner |
 |---|---|---|---|
-| **Alerts per distinct issue** | ~3.3× (56 alerts / ~17 issues) | ~1.1× (52 alerts / ~49 issues) | **Snyk** |
-| **Worst grouping offender** | 39 identical stack-trace alerts | 3 false-positive SQLi alerts | **Snyk** (by far) |
-| **Rule deduplication** | 2 XSS rules on same line | 1 rule per vulnerability class | **Snyk** |
+| **Alerts per distinct issue** | ~3.3× (56 alerts / ~17 issues) | ~1.7× (52 alerts / ~30 issues) | **CodeQL for SQLi, Snyk for stack-trace** |
+| **SQL injection grouping** | 6 alerts for ~6 issues (1:1) | 25 alerts for ~6 issues (4:1 inflation) | **CodeQL** |
+| **Stack trace grouping** | 39 alerts for 1 systemic issue (39:1) | N/A (not detected) | ❌ **CodeQL's worst area** |
+| **XSS rule deduplication** | 2 rules on same line (2:1) | 1 rule per location (1:1) | **Snyk** |
 | **Message diversity** | Identical messages for same rule | Varies by taint source | **Snyk** |
-| **Developer triage experience** | Dashboard dominated by medium noise | Each alert is distinct and actionable | **Snyk** |
+| **Developer triage experience** | Good for SQLi, poor for stack-traces | Good for XSS, inflated for SQLi | **Mixed — each has a weak spot** |
 
-**Verdict:** Snyk Code is significantly better at avoiding noise. Every Snyk alert represents a distinct code location with a meaningful, varied message. CodeQL's lack of grouping for `py/stack-trace-exposure` creates a wall of identical alerts that degrades triage quality substantially — a security team seeing 56 CodeQL alerts may not realize that 39 of them are the same pattern and only ~17 are distinct.
+**Verdict:** Neither tool is clearly better at grouping overall. CodeQL's SQL injection grouping is excellent (6 alerts for ~6 fixable issues vs Snyk's 25), but its stack-trace-exposure explosion (39 identical alerts) is the single worst noise source across both tools. Snyk's XSS grouping is clean (1 alert per distinct sink), but its source-level SQLi reporting inflates the count 4× vs CodeQL. A team using both tools needs to understand that **Snyk's 25 SQLi alerts ≈ CodeQL's 6 SQLi alerts** in terms of actual work required.
 
 ---
 
@@ -248,16 +276,16 @@ This section evaluates how well each tool consolidates related findings to minim
 
 **Estimated false positive rate:** ~3/52 = **~6%**
 
-### 5.2 CodeQL False Positives
+### 5.2 CodeQL Sink-Level Alerts
 
-| Location | Rule | Why it's low-signal |
+| Location | Rule | Assessment |
 |---|---|---|
-| `database.py:255` | `py/sql-injection` | Flags the generic `cursor.execute(query, params)` helper function — the sink, not the source. Whether this is exploitable depends entirely on how callers construct `query`. |
-| `database.py:280` | `py/sql-injection` | Same — flags `cursor.execute(query, params)` inside `execute_transaction()`. The function itself is safe when called with parameterized queries. |
+| `database.py:255` | `py/sql-injection` | Flags the `cursor.execute(query, params)` sink in `execute_query()`, grouping 7 taint paths. **This is good grouping, not a false positive** — multiple callers pass f-string queries through this function. The alert correctly identifies the convergence point. |
+| `database.py:280` | `py/sql-injection` | Same pattern for `execute_transaction()`, grouping 3 taint paths. Also a correct sink-level finding. |
 
-These aren't strictly false positives — they're **low-signal sink-level findings** that shift the burden to the developer to trace all callers.
+These are **accurate, well-grouped alerts**. By pointing at the sink, CodeQL gives the developer a single place to focus remediation (e.g., add input validation inside the function or fix all callers).
 
-**Estimated noise rate:** ~41/56 = **~73%** (39 identical stack-trace + 2 duplicate XSS + 2 low-signal sinks)
+**Estimated CodeQL noise rate:** ~41/56 = **~73%** (39 identical stack-trace + 2 duplicate XSS rules on same lines)
 
 ---
 
@@ -284,8 +312,8 @@ These aren't strictly false positives — they're **low-signal sink-level findin
 |---|:---:|:---:|---|
 | `app.py` | 22 | 42 | Both focus here; CodeQL inflated by 38 stack-trace alerts |
 | `auth.py` | 5 | 5 | Equal coverage, 4 overlapping SQLi locations |
-| `transaction_graphql.py` | 3 | 0 | **Snyk only** — CodeQL missed 3 SQLi in GraphQL resolvers |
-| `database.py` | 0 | 2 | **CodeQL only** — sink-level SQLi findings |
+| `transaction_graphql.py` | 3 | 0 | **Snyk only** — 3 paths to `execute_query` that CodeQL groups into its `database.py:255` alert |
+| `database.py` | 0 | 2 | **CodeQL only** — sink-level alerts grouping 7+3 taint paths from callers |
 | `static/dashboard.js` | 10 | 0 | **Snyk only** — CodeQL doesn't analyze standalone JS files |
 | `templates/admin.html` | 4 | 0 | **Snyk only** |
 | `templates/blog.html` | 1 | 2 | Overlap: same line, CodeQL uses 2 rules |
@@ -309,33 +337,37 @@ These aren't strictly false positives — they're **low-signal sink-level findin
 | | CodeQL | Snyk Code |
 |---|---|---|
 | Total alerts | 56 | 52 |
-| Distinct actionable issues (estimated) | ~17 | ~49 |
-| Noise alerts (duplicates + identical patterns) | ~39 | ~3 |
-| **Precision** | **~30%** (after grouping penalty) | **~94%** |
+| Distinct actionable issues (estimated) | ~17 | ~30 |
+| Noise alerts (duplicates + identical patterns) | ~39 (stack-trace + XSS dup) | ~22 (SQLi path inflation + FPs) |
+| **Precision (alerts/issues)** | **~30%** (after grouping penalty) | **~58%** |
 
-If we set aside the grouping issue and count by _distinct rule categories_, CodeQL has ~89% precision (only the database.py sink findings are truly low-signal). The problem is the presentation, not the analysis.
+Both tools have significant noise, but for different reasons. CodeQL's noise is dominated by the 39 identical stack-trace alerts. Snyk's noise comes from reporting 25 SQLi alerts for ~6 distinct vulnerabilities. If we count by _distinct fixable issues_, CodeQL has ~17 issues in 56 alerts and Snyk has ~30 issues in 52 alerts.
 
 ### Recall (completeness)
 
 | | CodeQL | Snyk Code |
 |---|---|---|
-| SQLi locations found | 6 | **25** |
-| XSS locations found | 2 (unique) | **22** |
+| SQLi distinct vulnerabilities | ~6 (grouped into 6 alerts) | ~6 (spread across 25 alerts) |
+| SQLi taint paths traced | 14 | **21** |
+| XSS distinct locations | 2 | **22** |
 | Unique high/critical findings only it found | **3** (SSRF, password logging, clear-text logging) | **3** (hardcoded key, hardcoded secret, insecure cookie) |
 | Vulnerability categories covered | **10** | 7 |
-| **Recall for injection flaws** | Low | **High** |
+| **Recall for SQLi** | **Equal** (same vulns, fewer paths) | **Equal** (same vulns, more paths) |
+| **Recall for XSS** | Low | **High** |
 | **Recall across all categories** | **High** | Moderate |
 
 ### Combined Scoring
 
 | Dimension | CodeQL | Snyk Code | Winner |
 |---|---|---|---|
-| SQL Injection detection | 6 locations | **25 locations** | **Snyk** |
+| SQL Injection (distinct vulns) | ~6 | ~6 | **Tie** — same vulnerabilities |
+| SQL Injection (grouping UX) | **6 alerts** | 25 alerts | **CodeQL** |
+| SQL Injection (path detail) | 14 paths, generic messages | **21 paths, source-specific messages** | **Snyk** |
 | XSS detection | 2 unique locations | **22 locations** | **Snyk** |
 | Breadth of categories | **10 categories** | 7 categories | **CodeQL** |
 | Critical/high-severity finds | **SSRF (critical), password logging (high)** | Hardcoded key, insecure cookie | **CodeQL** |
-| Precision (fewer false positives) | 89% (per-rule) / 30% (per-alert) | **94%** | **Snyk** |
-| Alert grouping quality | 73% noise | **6% noise** | **Snyk** |
+| Alert grouping (SQLi) | **Excellent** (sink-level) | Poor (source-level inflation) | **CodeQL** |
+| Alert grouping (stack-trace) | Poor (39 identical alerts) | N/A | ❌ **CodeQL's worst area** |
 | Severity classification | **✅ Populated** | ❌ All null | **CodeQL** |
 | Taint-flow message quality | Generic | **Specific per-source** | **Snyk** |
 | CWE references | **✅ Standard CWEs** | Tags only | **CodeQL** |
@@ -349,20 +381,22 @@ If we set aside the grouping issue and count by _distinct rule categories_, Code
 ### Run Both Tools Together
 
 Neither tool provides complete coverage. The combined view catches:
-- **25 SQLi + 22 XSS** locations (driven by Snyk)
-- **1 critical SSRF + 1 high password-logging** (driven by CodeQL)
+- **~6 SQLi vulnerabilities** (both tools detect them; CodeQL groups better, Snyk enumerates more paths)
+- **22 XSS locations** (driven almost entirely by Snyk)
+- **1 critical SSRF + 1 high password-logging** (CodeQL only)
 - **3 CI/CD hardening** issues (CodeQL only)
 - **3 hardcoded secrets/cookie** issues (Snyk only)
 
 ### Triage Strategy
 
 1. **Start with CodeQL critical/high** — the SSRF (`py/full-ssrf`) and password-logging (`py/clear-text-logging-sensitive-data`) findings are highest priority and only CodeQL found them.
-2. **Review Snyk SQLi and XSS** — these have the highest volume of true positives. Dismiss alerts on lines using `%s` parameterized queries (likely false positives).
-3. **Batch CodeQL's stack-trace alerts** — treat the 39 `py/stack-trace-exposure` findings as a single remediation item (add a global error handler that sanitizes exception messages).
-4. **Address Snyk's hardcoded secrets** — rotate the JWT key and application secret.
-5. **Harden CI/CD** — add permissions blocks and pin action tags per CodeQL's workflow findings.
+2. **Use CodeQL's 6 SQLi alerts as the primary triage view** — they represent the same ~6 distinct vulnerabilities as Snyk's 25 alerts, but with better grouping. Cross-reference Snyk's alerts for call-site detail when fixing.
+3. **Use Snyk for XSS** — its 22 DOM XSS findings are genuine and CodeQL catches only 2 of them.
+4. **Batch CodeQL's stack-trace alerts** — treat the 39 `py/stack-trace-exposure` findings as a single remediation item (add a global error handler that sanitizes exception messages).
+5. **Address Snyk's hardcoded secrets** — rotate the JWT key and application secret.
+6. **Harden CI/CD** — add permissions blocks and pin action tags per CodeQL's workflow findings.
 
 ### Improving Signal Quality
 
 - **For CodeQL:** Consider adding a `.github/codeql/codeql-config.yml` that adjusts the `py/stack-trace-exposure` query severity or groups findings by pattern, to reduce the 39-alert noise.
-- **For Snyk Code:** Investigate Snyk's SARIF configuration to ensure severity levels are populated in the upload. The missing severity data significantly hampers triage in GitHub's Code Scanning UI.
+- **For Snyk Code:** Investigate Snyk's SARIF configuration to ensure severity levels are populated in the upload. The missing severity data significantly hampers triage in GitHub's Code Scanning UI. Also, consider that Snyk's source-level SQLi reporting inflates alert counts — use CodeQL's grouped view for SQLi triage.
