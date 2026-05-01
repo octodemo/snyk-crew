@@ -516,6 +516,8 @@ def transfer(current_user):
         # Vulnerability: Negative amounts allowed
         amount = float(data.get('amount'))
         to_account = data.get('to_account')
+        if not to_account or not isinstance(to_account, str) or not to_account.isalnum() or len(to_account) > 20:
+            return jsonify({'status': 'error', 'message': 'Invalid account number'}), 400
         
         # Get sender's account number
         # Race condition vulnerability in checking balance
