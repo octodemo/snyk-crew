@@ -2095,13 +2095,12 @@ def create_bill_payment(current_user):
         
         if payment_method == 'virtual_card' and card_id:
             # Vulnerability: BOLA - no verification if card belongs to user
-            # Vulnerability: SQL injection possible
-            card_query = f"""
+            card_query = """
                 SELECT current_balance, card_limit, is_frozen 
                 FROM virtual_cards 
-                WHERE id = {card_id}
+                WHERE id = %s
             """
-            card = execute_query(card_query)[0]
+            card = execute_query(card_query, (card_id,))[0]
             
             if card[2]:  # is_frozen
                 return jsonify({
